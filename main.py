@@ -1,7 +1,9 @@
-# main.py — SOVITX MULTI-LANG HOST v2 (RENDER FIXED)
+# main.py — SOVITX MULTI-LANG HOST v3
+# ✅ Promo Code Interview Mode
+# ✅ Custom codes, expiry, max uses
+# ✅ Admin Approval Mode (ON/OFF)
 # ✅ All languages supported
-# ✅ Syntax error fixed
-# ✅ Deploy ready
+# ✅ Full user management
 
 import os
 import zipfile
@@ -42,15 +44,21 @@ ADMIN_USERNAME = "aalyanmods"
 ADMIN_DISPLAY_NAME = "💞 aalyanmods 💞"
 
 # Channel Mandatory
-REQUIRED_CHANNEL = "https://t.me/+qRrEEQX2ha02ZTU1"
-REQUIRED_CHANNEL_ID = -1002497131761
+REQUIRED_CHANNEL = "https://t.me/+PkB_IXJvsmJhYmE1"
+REQUIRED_CHANNEL_ID = -1004429113776
 
 BASE_DIR = os.path.join(os.getcwd(), "hosted_projects")
 PROMO_FILE = os.path.join(os.getcwd(), "promo_codes.json")
 USER_LIMITS_FILE = os.path.join(os.getcwd(), "user_limits.json")
+PENDING_FILE = os.path.join(os.getcwd(), "pending_approvals.json")
 PORT = int(os.environ.get('PORT', 8080))
 MAX_FILE_SIZE = 50 * 1024 * 1024
 DEFAULT_USER_LIMIT = 3
+
+# --- APPROVAL MODE (NEW) ---
+APPROVAL_MODE = os.environ.get('APPROVAL_MODE', 'OFF').upper() == 'ON'
+# ON = admin must approve every upload
+# OFF = auto-approve
 
 # Logging
 logging.basicConfig(
@@ -71,6 +79,19 @@ project_owners = {}
 recovery_enabled = True
 live_logs_enabled = True
 user_log_sessions = {}
+
+# --- PENDING APPROVALS (NEW) ---
+def load_pending():
+    if os.path.exists(PENDING_FILE):
+        with open(PENDING_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_pending(pending):
+    with open(PENDING_FILE, 'w') as f:
+        json.dump(pending, f, indent=2)
+
+pending_approvals = load_pending()
 
 # --- USER LIMITS ---
 def load_user_limits():
@@ -98,7 +119,7 @@ def get_user_project_count(user_id):
 def can_user_upload(user_id):
     return get_user_project_count(user_id) < get_user_limit(user_id)
 
-# --- PROMO CODES ---
+# --- PROMO CODES (INTERVIEW MODE) ---
 def load_promos():
     if os.path.exists(PROMO_FILE):
         with open(PROMO_FILE, 'r') as f:
@@ -111,42 +132,51 @@ def save_promos(promos):
 
 promo_codes = load_promos()
 
-def generate_promo_code():
-    import random
-    import string
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-
-def create_promo_codes(count, bonus_limits=2):
-    generated = []
-    for _ in range(count):
-        code = generate_promo_code()
-        promo_codes[code] = {
-            "bonus": bonus_limits,
-            "used": False,
-            "used_by": None,
-            "created_at": datetime.now().isoformat(),
-            "expires_at": (datetime.now() + timedelta(days=7)).isoformat()
-        }
-        generated.append(code)
+def create_promo_code_interview(code, bonus_limits, expiry_days, max_uses):
+    """Interview mode — admin defines everything"""
+    promo_codes[code] = {
+        "bonus": bonus_limits,
+        "used": 0,
+        "max_uses": max_uses,
+        "used_by": [],
+        "created_at": datetime.now().isoformat(),
+        "expires_at": (datetime.now() + timedelta(days=expiry_days)).isoformat(),
+        "expiry_days": expiry_days,
+        "active": True
+    }
     save_promos(promo_codes)
-    return generated
+    return True
 
 def redeem_promo_code(user_id, code):
     if code not in promo_codes:
         return False, "❌ Invalid promo code!"
     promo = promo_codes[code]
-    if promo["used"]:
-        return False, "❌ Code already used!"
+    if not promo["active"]:
+        return False, "❌ This code is inactive!"
+    if promo["used"] >= promo["max_uses"]:
+        return False, f"❌ This code has reached its max uses ({promo['max_uses']})!"
     if datetime.now() > datetime.fromisoformat(promo["expires_at"]):
-        return False, "❌ Code expired!"
+        return False, "❌ This code has expired!"
+    if str(user_id) in promo["used_by"]:
+        return False, "❌ You have already used this code!"
     
+    # Apply bonus
     current = get_user_limit(user_id)
     new_limit = current + promo["bonus"]
     set_user_limit(user_id, new_limit)
-    promo["used"] = True
-    promo["used_by"] = user_id
+    
+    promo["used"] += 1
+    promo["used_by"].append(str(user_id))
     save_promos(promo_codes)
+    
     return True, f"✅ Redeemed! New limit: {new_limit} (+{promo['bonus']})"
+
+def deactivate_promo(code):
+    if code in promo_codes:
+        promo_codes[code]["active"] = False
+        save_promos(promo_codes)
+        return True
+    return False
 
 # --- PSUTIL ---
 try:
@@ -251,7 +281,6 @@ def get_ext(filename):
     return os.path.splitext(filename)[1].lower()
 
 def get_language_info(ext):
-    """Returns (language_name, run_command_template, needs_compile)"""
     info = {
         '.py': ('Python', 'python3 -u {file}', False),
         '.js': ('JavaScript', 'node {file}', False),
@@ -270,7 +299,6 @@ def get_language_info(ext):
     return info.get(ext, ('Unknown', 'echo "Unsupported: {file}"', False))
 
 def get_run_command(file_path, ext):
-    """Returns proper run command for any language"""
     lang, template, needs_compile = get_language_info(ext)
     if lang == 'Unknown':
         return ['echo', f'Unsupported file type: {ext}']
@@ -278,7 +306,6 @@ def get_run_command(file_path, ext):
     dirname = os.path.dirname(file_path)
     filename = os.path.basename(file_path)
     
-    # FIX: Handle Java with proper class_name (not 'class')
     if ext == '.java':
         class_name = filename.replace('.java', '')
         cmd = f'javac "{file_path}" && java -cp "{dirname}" {class_name}'
@@ -289,7 +316,6 @@ def get_run_command(file_path, ext):
     elif ext == '.html':
         return ['echo', f'HTML file served at /project/{os.path.basename(dirname)}']
     else:
-        # For other languages, use template
         cmd = template.format(file=file_path, dir=dirname, class_name='')
         if '&&' in cmd:
             return ['bash', '-c', cmd]
@@ -302,11 +328,13 @@ app = Flask(__name__)
 def home():
     return jsonify({
         "status": "online",
-        "service": "SOVITX MULTI-LANG HOST v2",
+        "service": "SOVITX MULTI-LANG HOST v3",
         "projects": len(project_owners),
         "running": len([p for p in running_processes.values() if p.poll() is None]),
         "recovery": recovery_enabled,
-        "live_logs": live_logs_enabled
+        "live_logs": live_logs_enabled,
+        "approval_mode": "ON" if APPROVAL_MODE else "OFF",
+        "pending": len(pending_approvals)
     })
 
 @app.route('/health')
@@ -329,6 +357,7 @@ def get_main_keyboard(user_id):
     restart_status = "🔄 RESTART: OFF" if auto_restart_mode else "🔄 RESTART: ON"
     recovery_status = "🛡️ RECOVERY: OFF" if recovery_enabled else "🛡️ RECOVERY: ON"
     logs_status = "📺 LOGS: OFF" if live_logs_enabled else "📺 LOGS: ON"
+    approval_status = "✅ APPROVAL: ON" if APPROVAL_MODE else "✅ APPROVAL: OFF"
     
     if is_admin(user_id):
         layout = [
@@ -337,7 +366,8 @@ def get_main_keyboard(user_id):
             [KeyboardButton("🌎 INFO"), KeyboardButton("📠 CONTACT")],
             [KeyboardButton(lock_status), KeyboardButton(restart_status)],
             [KeyboardButton(recovery_status), KeyboardButton("📊 STATUS")],
-            [KeyboardButton(logs_status), KeyboardButton("🎫 PROMO")]
+            [KeyboardButton(logs_status), KeyboardButton("🎫 PROMO")],
+            [KeyboardButton(approval_status), KeyboardButton("👥 USERS")]
         ]
     else:
         layout = [
@@ -418,6 +448,333 @@ async def get_system_health():
         }
     return {"status": "basic", "platform": platform.system(), "python": platform.python_version()}
 
+# --- ADMIN USER MANAGEMENT ---
+async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all users with their limits"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only!", parse_mode='Markdown')
+        return
+    
+    if not project_owners:
+        await update.message.reply_text("👥 **No users found**", parse_mode='Markdown')
+        return
+    
+    users = {}
+    for pname, data in project_owners.items():
+        uid = data["u_id"]
+        if uid not in users:
+            users[uid] = {
+                "name": data.get("u_name", "Unknown"),
+                "username": data.get("u_username", "No username"),
+                "limit": get_user_limit(uid),
+                "projects": []
+            }
+        users[uid]["projects"].append(pname)
+    
+    msg = "👥 **USER MANAGEMENT**\n━━━━━━━━━━━━━━━━━━━━━\n"
+    for uid, data in users.items():
+        msg += f"👤 `{data['name']}` (@{data['username']})\n"
+        msg += f"📦 Limit: {data['limit']} | Used: {len(data['projects'])}\n"
+        msg += f"📁 Projects: {', '.join(data['projects'][:3])}\n"
+        if len(data['projects']) > 3:
+            msg += f"... and {len(data['projects']) - 3} more\n"
+        msg += "━━━━━━━━━━━━━━━━━━━━━\n"
+    
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+async def cmd_setlimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setlimit @username 10"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only!", parse_mode='Markdown')
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("❌ Use: `/setlimit @username 10`", parse_mode='Markdown')
+        return
+    
+    username = args[0].replace('@', '')
+    limit = int(args[1]) if args[1].isdigit() else DEFAULT_USER_LIMIT
+    
+    target_user = None
+    for uid, data in project_owners.items():
+        if data.get("u_username") == username:
+            target_user = data["u_id"]
+            break
+    
+    if target_user:
+        set_user_limit(target_user, limit)
+        await update.message.reply_text(f"✅ User @{username} limit set to {limit}", parse_mode='Markdown')
+    else:
+        await update.message.reply_text(f"⚠️ User @{username} not found", parse_mode='Markdown')
+
+# --- PROMO CODE INTERVIEW COMMAND ---
+promo_interview_state = {}
+
+async def cmd_makecode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start promo code interview"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only!", parse_mode='Markdown')
+        return
+    
+    user_id = update.effective_user.id
+    promo_interview_state[user_id] = {"step": "waiting_details"}
+    
+    await update.message.reply_text(
+        "📝 **PROMO CODE GENERATOR — INTERVIEW MODE**\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "Send details in this format:\n"
+        "`CODE | BONUS_LIMITS | EXPIRY_DAYS | MAX_USES`\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "Example:\n"
+        "`VIP2026 | 5 | 7 | 10`\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "- CODE: Custom promo code\n"
+        "- BONUS_LIMITS: How many extra slots\n"
+        "- EXPIRY_DAYS: Days until expiry\n"
+        "- MAX_USES: Max redemptions",
+        parse_mode='Markdown'
+    )
+
+async def handle_promo_interview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle promo interview response"""
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    if user_id not in promo_interview_state:
+        return
+    
+    if promo_interview_state[user_id].get("step") != "waiting_details":
+        return
+    
+    # Parse the input
+    parts = text.split('|')
+    if len(parts) < 4:
+        await update.message.reply_text(
+            "❌ **Invalid format!**\n"
+            "Use: `CODE | BONUS_LIMITS | EXPIRY_DAYS | MAX_USES`\n"
+            "Example: `VIP2026 | 5 | 7 | 10`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    code = parts[0].strip().upper()
+    try:
+        bonus = int(parts[1].strip())
+        expiry = int(parts[2].strip())
+        max_uses = int(parts[3].strip())
+    except ValueError:
+        await update.message.reply_text("❌ **Invalid numbers!** Please enter valid integers.", parse_mode='Markdown')
+        return
+    
+    if bonus < 0 or expiry < 0 or max_uses < 0:
+        await update.message.reply_text("❌ **Numbers must be positive!**", parse_mode='Markdown')
+        return
+    
+    if code in promo_codes:
+        await update.message.reply_text(f"❌ **Code `{code}` already exists!** Choose a different one.", parse_mode='Markdown')
+        return
+    
+    # Create promo code
+    success = create_promo_code_interview(code, bonus, expiry, max_uses)
+    
+    if success:
+        del promo_interview_state[user_id]
+        await update.message.reply_text(
+            f"✅ **Promo code created!**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📝 Code: `{code}`\n"
+            f"📦 Bonus: +{bonus} slots\n"
+            f"📅 Expiry: {expiry} days\n"
+            f"🔁 Max uses: {max_uses}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Send to users: `/redeem {code}`",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text("❌ Failed to create promo code!", parse_mode='Markdown')
+
+# --- APPROVAL TOGGLE ---
+async def toggle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle approval mode ON/OFF"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only!", parse_mode='Markdown')
+        return
+    
+    global APPROVAL_MODE
+    APPROVAL_MODE = not APPROVAL_MODE
+    
+    status = "ON" if APPROVAL_MODE else "OFF"
+    await update.message.reply_text(
+        f"✅ **Approval Mode: {status}**\n"
+        f"{'🛡️ Admin must approve all uploads' if APPROVAL_MODE else '🚀 Auto-approve enabled'}",
+        parse_mode='Markdown'
+    )
+    
+    # Update keyboard
+    await update.message.reply_text("Menu updated!", reply_markup=get_main_keyboard(update.effective_user.id), parse_mode='Markdown')
+
+# --- APPROVAL HANDLING (NEW) ---
+async def handle_approval_request(update: Update, context: ContextTypes.DEFAULT_TYPE, project_name, file_path, user_id, lang):
+    """Send approval request to all admins"""
+    user_name = update.effective_user.full_name
+    user_username = update.effective_user.username or "no_username"
+    
+    pending_id = f"{user_id}_{int(time.time())}"
+    pending_approvals[pending_id] = {
+        "user_id": user_id,
+        "user_name": user_name,
+        "user_username": user_username,
+        "project_name": project_name,
+        "file_path": file_path,
+        "language": lang,
+        "status": "pending",
+        "submitted_at": datetime.now().isoformat()
+    }
+    save_pending(pending_approvals)
+    
+    # Notify all admins
+    keyboard = [
+        [InlineKeyboardButton("✅ APPROVE", callback_data=f"approve_{pending_id}")],
+        [InlineKeyboardButton("❌ REJECT", callback_data=f"reject_{pending_id}")]
+    ]
+    
+    msg = (
+        f"🛡️ **NEW UPLOAD REQUEST**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 User: {user_name} (@{user_username})\n"
+        f"📁 Project: `{project_name}`\n"
+        f"📁 Language: {lang}\n"
+        f"🕐 Submitted: {datetime.now().strftime('%H:%M:%S')}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━"
+    )
+    
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=msg,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        except:
+            pass
+    
+    await update.message.reply_text(
+        f"⏳ **Your upload is pending admin approval!**\n"
+        f"Please wait for admin to approve your project.",
+        parse_mode='Markdown'
+    )
+
+async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle approve/reject callbacks from admins"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await query.answer("❌ Admin only!", show_alert=True)
+        return
+    
+    data = query.data
+    parts = data.split('_', 1)
+    action = parts[0]
+    pending_id = parts[1]
+    
+    if pending_id not in pending_approvals:
+        await query.edit_message_text("❌ Request not found!", parse_mode='Markdown')
+        return
+    
+    pending = pending_approvals[pending_id]
+    
+    if action == "approve":
+        # Move file to final location
+        try:
+            project_name = pending["project_name"]
+            final_path = os.path.join(BASE_DIR, project_name)
+            
+            if os.path.exists(final_path):
+                project_name = f"{project_name}_{int(time.time())}"
+                final_path = os.path.join(BASE_DIR, project_name)
+            
+            os.makedirs(final_path, exist_ok=True)
+            
+            file_path = pending["file_path"]
+            file_name = os.path.basename(file_path)
+            new_file_path = os.path.join(final_path, file_name)
+            shutil.move(file_path, new_file_path)
+            
+            # Install requirements if exists
+            req_path = os.path.join(final_path, 'requirements.txt')
+            if os.path.exists(req_path):
+                subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path], capture_output=True, cwd=final_path)
+            
+            # Save project
+            project_owners[project_name] = {
+                "u_id": pending["user_id"],
+                "u_name": pending["user_name"],
+                "u_username": pending["user_username"],
+                "path": final_path,
+                "main_file": new_file_path,
+                "language": pending["language"],
+                "uploaded_at": datetime.now().isoformat(),
+                "approved_by": user_id,
+                "approved_at": datetime.now().isoformat()
+            }
+            
+            del pending_approvals[pending_id]
+            save_pending(pending_approvals)
+            
+            # Notify user
+            try:
+                await context.bot.send_message(
+                    chat_id=pending["user_id"],
+                    text=f"✅ **Your project `{project_name}` has been approved!**\n"
+                         f"📁 Language: {pending['language']}\n"
+                         f"🚀 Click '📁 PROJECTS' to run it.",
+                    parse_mode='Markdown'
+                )
+            except:
+                pass
+            
+            await query.edit_message_text(
+                f"✅ **Project `{project_name}` approved!**\n"
+                f"👤 User: {pending['user_name']}\n"
+                f"📁 Language: {pending['language']}",
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error approving: {str(e)}", parse_mode='Markdown')
+    
+    elif action == "reject":
+        # Delete temp files
+        try:
+            file_path = pending["file_path"]
+            temp_dir = os.path.dirname(file_path)
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+        except:
+            pass
+        
+        # Notify user
+        try:
+            await context.bot.send_message(
+                chat_id=pending["user_id"],
+                text=f"❌ **Your project `{pending['project_name']}` was rejected by admin.**",
+                parse_mode='Markdown'
+            )
+        except:
+            pass
+        
+        del pending_approvals[pending_id]
+        save_pending(pending_approvals)
+        
+        await query.edit_message_text(
+            f"❌ **Project `{pending['project_name']}` rejected!**\n"
+            f"👤 User: {pending['user_name']}",
+            parse_mode='Markdown'
+        )
+
 # --- COMMAND HANDLERS ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -429,7 +786,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     msg = (
-        "🌍 **SOVITX MULTI-LANG HOST v2** 🌍\n"
+        "🌍 **SOVITX MULTI-LANG HOST v3** 🌍\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "🔥 **Upload ANY file in ANY language**\n"
         "✅ Python | JavaScript | Go | Rust | Java\n"
@@ -437,12 +794,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 **Your limit:** {get_user_limit(user_id)} projects\n"
         f"📦 **Used:** {get_user_project_count(user_id)}/{get_user_limit(user_id)}\n"
+        f"🛡️ **Approval Mode:** {'ON' if APPROVAL_MODE else 'OFF'}\n"
         f"👑 **Owner:** {ADMIN_USERNAME}\n"
         "━━━━━━━━━━━━━━━━━━━━━"
     )
     await update.message.reply_text(msg, reply_markup=get_main_keyboard(user_id), parse_mode='Markdown')
 
-# --- UPLOAD HANDLER ---
+# --- UPLOAD HANDLER (WITH APPROVAL) ---
 async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not await require_channel(update, context):
@@ -472,12 +830,13 @@ async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Or send a `.zip` with your project\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 Used: {get_user_project_count(user_id)}/{get_user_limit(user_id)}\n"
+        f"🛡️ Approval Mode: {'ON (Admin will review)' if APPROVAL_MODE else 'OFF (Auto-deploy)'}\n"
         "Send file now or /cancel",
         parse_mode='Markdown'
     )
     user_upload_state[user_id] = {"step": "waiting_file"}
 
-# --- HANDLE DOCUMENTS / FILES ---
+# --- HANDLE DOCUMENTS / FILES (WITH APPROVAL) ---
 async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not await require_channel(update, context):
@@ -518,7 +877,6 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Check if ZIP
         if ext == '.zip':
-            # Extract ZIP
             await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="📦 Extracting ZIP...")
             with zipfile.ZipFile(file_path, 'r') as z:
                 z.extractall(temp_dir)
@@ -542,49 +900,62 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 shutil.rmtree(temp_dir)
                 return
             
-            # Move extracted files to final location
-            project_name = os.path.basename(doc.file_name).replace('.zip', '').replace(' ', '_')
-            final_path = os.path.join(BASE_DIR, project_name)
-            if os.path.exists(final_path):
-                project_name = f"{project_name}_{int(time.time())}"
-                final_path = os.path.join(BASE_DIR, project_name)
-            
-            # Move all extracted files
-            for item in os.listdir(temp_dir):
-                src = os.path.join(temp_dir, item)
-                dst = os.path.join(final_path, item)
-                shutil.move(src, dst)
-            shutil.rmtree(temp_dir)
-            
-            # Install requirements if exists
-            req_path = os.path.join(final_path, 'requirements.txt')
-            if os.path.exists(req_path):
-                await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="📦 Installing dependencies...")
-                subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path], capture_output=True, cwd=final_path)
-            
-            # Save project
             lang, _, _ = get_language_info(get_ext(main_file))
-            project_owners[project_name] = {
-                "u_id": user_id,
-                "u_name": update.effective_user.full_name,
-                "u_username": update.effective_user.username or "no_username",
-                "path": final_path,
-                "main_file": main_file,
-                "language": lang,
-                "uploaded_at": datetime.now().isoformat()
-            }
-            del user_upload_state[user_id]
+            project_name = os.path.basename(doc.file_name).replace('.zip', '').replace(' ', '_')
             
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
-                text=f"✅ **Project `{project_name}` ready!**\n"
-                     f"📁 Language: {lang}\n"
-                     f"📦 Used: {get_user_project_count(user_id)}/{get_user_limit(user_id)}\n"
-                     f"🚀 Click '📁 PROJECTS' to run it.",
-                parse_mode='Markdown'
-            )
-            return
+            # Check approval mode
+            if APPROVAL_MODE:
+                # Move to pending
+                await handle_approval_request(update, context, project_name, main_file, user_id, lang)
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=msg.message_id,
+                    text=f"⏳ **Project `{project_name}` sent for approval!**\n"
+                         f"📁 Language: {lang}\n"
+                         f"Wait for admin to approve.",
+                    parse_mode='Markdown'
+                )
+                # Clean up temp dir after approval
+                return
+            else:
+                # Auto-approve
+                final_path = os.path.join(BASE_DIR, project_name)
+                if os.path.exists(final_path):
+                    project_name = f"{project_name}_{int(time.time())}"
+                    final_path = os.path.join(BASE_DIR, project_name)
+                
+                for item in os.listdir(temp_dir):
+                    src = os.path.join(temp_dir, item)
+                    dst = os.path.join(final_path, item)
+                    shutil.move(src, dst)
+                shutil.rmtree(temp_dir)
+                
+                req_path = os.path.join(final_path, 'requirements.txt')
+                if os.path.exists(req_path):
+                    await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text="📦 Installing dependencies...")
+                    subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path], capture_output=True, cwd=final_path)
+                
+                project_owners[project_name] = {
+                    "u_id": user_id,
+                    "u_name": update.effective_user.full_name,
+                    "u_username": update.effective_user.username or "no_username",
+                    "path": final_path,
+                    "main_file": main_file,
+                    "language": lang,
+                    "uploaded_at": datetime.now().isoformat()
+                }
+                del user_upload_state[user_id]
+                
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=msg.message_id,
+                    text=f"✅ **Project `{project_name}` deployed!**\n"
+                         f"📁 Language: {lang}\n"
+                         f"📦 Used: {get_user_project_count(user_id)}/{get_user_limit(user_id)}\n"
+                         f"🚀 Click '📁 PROJECTS' to run it.",
+                    parse_mode='Markdown'
+                )
+                return
         
         # --- SINGLE FILE UPLOAD ---
         lang, _, _ = get_language_info(ext)
@@ -599,7 +970,8 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "file_path": file_path,
             "ext": ext,
             "lang": lang,
-            "temp_dir": temp_dir
+            "temp_dir": temp_dir,
+            "file_name": doc.file_name
         }
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -621,7 +993,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
-    global bot_locked, auto_restart_mode, recovery_enabled, live_logs_enabled
+    global bot_locked, auto_restart_mode, recovery_enabled, live_logs_enabled, APPROVAL_MODE
     
     if not await require_channel(update, context):
         return
@@ -629,32 +1001,49 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔒 Locked", parse_mode='Markdown')
         return
     
-    # --- PROJECT NAME INPUT ---
+    # --- PROMO INTERVIEW HANDLING ---
+    if user_id in promo_interview_state:
+        await handle_promo_interview(update, context)
+        return
+    
+    # --- PROJECT NAME INPUT (with approval) ---
     if user_id in user_upload_state and user_upload_state[user_id].get("step") == "waiting_name":
         state = user_upload_state[user_id]
         project_name = text.replace(' ', '_').replace('/', '_').replace('\\', '_')
-        final_path = os.path.join(BASE_DIR, project_name)
         
+        if APPROVAL_MODE:
+            # Send for approval
+            file_path = state["file_path"]
+            lang = state["lang"]
+            await handle_approval_request(update, context, project_name, file_path, user_id, lang)
+            await update.message.reply_text(
+                f"⏳ **Project `{project_name}` sent for approval!**\n"
+                f"📁 Language: {lang}\n"
+                f"Wait for admin to approve.",
+                parse_mode='Markdown'
+            )
+            del user_upload_state[user_id]
+            return
+        
+        # Auto-approve
+        final_path = os.path.join(BASE_DIR, project_name)
         if os.path.exists(final_path):
             project_name = f"{project_name}_{int(time.time())}"
             final_path = os.path.join(BASE_DIR, project_name)
         
         try:
-            # Move file to final location
             os.makedirs(final_path, exist_ok=True)
             file_name = os.path.basename(state["file_path"])
             new_file_path = os.path.join(final_path, file_name)
             shutil.move(state["file_path"], new_file_path)
             shutil.rmtree(state["temp_dir"])
             
-            # Install requirements if exists (for Python)
             req_path = os.path.join(final_path, 'requirements.txt')
             if os.path.exists(req_path):
                 msg = await update.message.reply_text("📦 Installing dependencies...")
                 subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path], capture_output=True, cwd=final_path)
                 await msg.delete()
             
-            # Save project
             project_owners[project_name] = {
                 "u_id": user_id,
                 "u_name": update.effective_user.full_name,
@@ -667,7 +1056,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_upload_state[user_id]
             
             await update.message.reply_text(
-                f"✅ **Project `{project_name}` saved!**\n"
+                f"✅ **Project `{project_name}` deployed!**\n"
                 f"📁 Language: {state['lang']}\n"
                 f"📦 Used: {get_user_project_count(user_id)}/{get_user_limit(user_id)}\n"
                 f"🚀 Click '📁 PROJECTS' to run.",
@@ -714,7 +1103,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📦 Projects: {len(project_owners)}\n"
                 f"💚 Running: {len([p for p in running_processes.values() if p.poll() is None])}\n"
                 f"📺 Live Logs: {'ON' if live_logs_enabled else 'OFF'}\n"
-                f"🛡️ Recovery: {'ON' if recovery_enabled else 'OFF'}"
+                f"🛡️ Recovery: {'ON' if recovery_enabled else 'OFF'}\n"
+                f"✅ Approval Mode: {'ON' if APPROVAL_MODE else 'OFF'}\n"
+                f"⏳ Pending: {len(pending_approvals)}"
             )
         else:
             msg = (
@@ -722,7 +1113,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🖥️ Platform: {health.get('platform', 'Unknown')}\n"
                 f"🐍 Python: {health.get('python', 'Unknown')}\n"
                 f"📦 Projects: {len(project_owners)}\n"
-                f"💚 Running: {len([p for p in running_processes.values() if p.poll() is None])}"
+                f"💚 Running: {len([p for p in running_processes.values() if p.poll() is None])}\n"
+                f"✅ Approval Mode: {'ON' if APPROVAL_MODE else 'OFF'}"
             )
         await update.message.reply_text(msg, parse_mode='Markdown')
     
@@ -733,6 +1125,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔄 Auto-Restart: {'ON' if auto_restart_mode else 'OFF'}\n"
             f"🛡️ Recovery: {'ON' if recovery_enabled else 'OFF'}\n"
             f"📺 Live Logs: {'ON' if live_logs_enabled else 'OFF'}\n"
+            f"✅ Approval Mode: {'ON' if APPROVAL_MODE else 'OFF'}\n"
             f"📦 Default Limit: {DEFAULT_USER_LIMIT}\n"
             f"📢 Channel: {REQUIRED_CHANNEL}",
             parse_mode='Markdown'
@@ -746,12 +1139,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_admin(user_id):
             await update.message.reply_text(
                 "🎫 **PROMO CODE ADMIN**\n━━━━━━━━━━━━━━━━━━━━━\n"
-                "`/gencode <count>` — Generate codes\n"
+                "`/makecode` — Interview mode (custom code)\n"
                 "`/listcodes` — List all codes\n"
-                "`/setlimit @user <limit>` — Set user limit\n"
+                "`/deactivate CODE` — Deactivate a code\n"
                 "━━━━━━━━━━━━━━━━━━━━━\n"
                 f"Total codes: {len(promo_codes)}\n"
-                f"Used: {len([c for c in promo_codes.values() if c['used']])}",
+                f"Total redeemed: {sum([c.get('used', 0) for c in promo_codes.values()])}",
                 parse_mode='Markdown'
             )
         else:
@@ -762,6 +1155,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Used: {get_user_project_count(user_id)}/{get_user_limit(user_id)}",
                 parse_mode='Markdown'
             )
+    
+    elif text == "👥 USERS" and is_admin(user_id):
+        await cmd_users(update, context)
+    
+    elif text == "✅ APPROVAL: ON" and is_admin(user_id):
+        await toggle_approval(update, context)
+    
+    elif text == "✅ APPROVAL: OFF" and is_admin(user_id):
+        await toggle_approval(update, context)
     
     elif text in ["🔒 LOCK", "🔓 UNLOCK"] and is_admin(user_id):
         bot_locked = "🔒 LOCK" in text
@@ -793,14 +1195,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "📊 STATUS" and is_admin(user_id):
         total = len(project_owners)
         running = len([p for p in running_processes.values() if p.poll() is None])
+        pending = len(pending_approvals)
         msg = (
             "📊 **PROJECT STATUS**\n━━━━━━━━━━━━━━━━━━━━━\n"
             f"📦 Total: {total}\n"
             f"💚 Running: {running}\n"
             f"💔 Offline: {total - running}\n"
+            f"⏳ Pending Approval: {pending}\n"
             f"📺 Live Logs: {'ON' if live_logs_enabled else 'OFF'}\n"
             f"🛡️ Recovery: {'ON' if recovery_enabled else 'OFF'}\n"
-            f"🔄 Auto-Restart: {'ON' if auto_restart_mode else 'OFF'}"
+            f"🔄 Auto-Restart: {'ON' if auto_restart_mode else 'OFF'}\n"
+            f"✅ Approval Mode: {'ON' if APPROVAL_MODE else 'OFF'}"
         )
         await update.message.reply_text(msg, parse_mode='Markdown')
     
@@ -810,9 +1215,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- CALLBACK HANDLER ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
     user_id = update.effective_user.id
+    
+    # --- Approval Callbacks ---
+    if data.startswith("approve_") or data.startswith("reject_"):
+        await handle_approval_callback(update, context)
+        return
+    
+    await query.answer()
     
     if data == "check_join":
         if await check_channel_membership(user_id, context):
@@ -867,7 +1278,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         main_file = project_owners[p_name].get("main_file")
         
         if not main_file or not os.path.exists(main_file):
-            # Find any executable file
             for f in os.listdir(folder):
                 if f.endswith(('.py', '.js', '.go', '.rs', '.java', '.cpp', '.c', '.sh', '.rb', '.php')):
                     main_file = os.path.join(folder, f)
@@ -1047,51 +1457,34 @@ async def cmd_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     success, msg = redeem_promo_code(user_id, code)
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-async def cmd_gencode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+async def cmd_deactivate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deactivate a promo code"""
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Admin only!", parse_mode='Markdown')
         return
     args = context.args
-    count = int(args[0]) if args and args[0].isdigit() else 5
-    codes = create_promo_codes(min(count, 50))
-    msg = "🎫 **Promo codes generated:**\n━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join([f"`{c}`" for c in codes]) + "\n━━━━━━━━━━━━━━━━━━━━━\nSend to users: `/redeem CODE`"
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    if not args:
+        await update.message.reply_text("❌ Use: `/deactivate CODE`", parse_mode='Markdown')
+        return
+    code = args[0].upper()
+    if deactivate_promo(code):
+        await update.message.reply_text(f"✅ Code `{code}` deactivated!", parse_mode='Markdown')
+    else:
+        await update.message.reply_text(f"❌ Code `{code}` not found!", parse_mode='Markdown')
 
 async def cmd_listcodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Admin only!", parse_mode='Markdown')
         return
     total = len(promo_codes)
-    used = len([c for c in promo_codes.values() if c["used"]])
+    used = sum([c.get("used", 0) for c in promo_codes.values()])
     msg = f"🎫 **Promo codes:** {total} total, {used} used\n━━━━━━━━━━━━━━━━━━━━━\n"
     for code, data in list(promo_codes.items())[:20]:
-        status = "✅ USED" if data["used"] else "🟢 AVAILABLE"
+        status = "🔴 INACTIVE" if not data.get("active", True) else f"🟢 {data['used']}/{data['max_uses']}"
         msg += f"`{code}` → {status}\n"
     if total > 20:
         msg += f"... and {total - 20} more"
     await update.message.reply_text(msg, parse_mode='Markdown')
-
-async def cmd_setlimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Admin only!", parse_mode='Markdown')
-        return
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("❌ Use: `/setlimit @username 10`", parse_mode='Markdown')
-        return
-    username = args[0].replace('@', '')
-    limit = int(args[1]) if args[1].isdigit() else DEFAULT_USER_LIMIT
-    target_user = None
-    for uid, data in project_owners.items():
-        if data.get("u_username") == username:
-            target_user = data["u_id"]
-            break
-    if target_user:
-        set_user_limit(target_user, limit)
-        await update.message.reply_text(f"✅ User @{username} limit set to {limit}", parse_mode='Markdown')
-    else:
-        await update.message.reply_text(f"⚠️ User @{username} not found in projects", parse_mode='Markdown')
 
 async def cmd_mylimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1105,17 +1498,36 @@ async def cmd_mylimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📚 **SOVITX MULTI-LANG HOST**\n━━━━━━━━━━━━━━━━━━━━━\n"
-        "📤 Upload any file\n"
-        "📁 Manage your projects\n"
-        "🎫 Redeem promo codes\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "📢 Join channel first!\n"
-        "👑 Admin: /gencode, /listcodes, /setlimit\n"
-        "👤 User: /redeem, /mylimit",
-        parse_mode='Markdown'
-    )
+    user_id = update.effective_user.id
+    if is_admin(user_id):
+        help_text = (
+            "📚 **SOVITX MULTI-LANG HOST v3**\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "📤 Upload any file\n"
+            "📁 Manage your projects\n"
+            "🎫 Redeem promo codes\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "👑 **Admin Commands:**\n"
+            "/makecode — Interview promo creator\n"
+            "/listcodes — List all codes\n"
+            "/deactivate CODE — Deactivate code\n"
+            "/setlimit @user 10 — Set user limit\n"
+            "/users — List all users\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "📢 Join channel first!"
+        )
+    else:
+        help_text = (
+            "📚 **SOVITX MULTI-LANG HOST v3**\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "📤 Upload any file\n"
+            "📁 Manage your projects\n"
+            "🎫 Redeem promo codes: /redeem CODE\n"
+            "📦 Check limit: /mylimit\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "📢 Join channel first!"
+        )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 # --- SIGNAL HANDLER ---
 def signal_handler(signum, frame):
@@ -1165,10 +1577,12 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("redeem", cmd_redeem))
-    application.add_handler(CommandHandler("gencode", cmd_gencode))
+    application.add_handler(CommandHandler("makecode", cmd_makecode))
     application.add_handler(CommandHandler("listcodes", cmd_listcodes))
+    application.add_handler(CommandHandler("deactivate", cmd_deactivate))
     application.add_handler(CommandHandler("setlimit", cmd_setlimit))
     application.add_handler(CommandHandler("mylimit", cmd_mylimit))
+    application.add_handler(CommandHandler("users", cmd_users))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_doc))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(CallbackQueryHandler(button_callback))
