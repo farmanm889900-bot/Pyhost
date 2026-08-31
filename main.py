@@ -1,7 +1,7 @@
-# main.py — SOVITX MULTI-LANG HOST v2
-# ANY FILE — ANY LANGUAGE — USER LIMITS — PROMO CODES
-# ✅ Python, JavaScript, Go, Rust, Java, C++, C, Bash, Ruby, PHP, HTML, ZIP
-# ✅ All working, tested, production ready
+# main.py — SOVITX MULTI-LANG HOST v2 (RENDER FIXED)
+# ✅ All languages supported
+# ✅ Syntax error fixed
+# ✅ Deploy ready
 
 import os
 import zipfile
@@ -25,7 +25,7 @@ from telegram import ReplyKeyboardMarkup, KeyboardButton, Update, InlineKeyboard
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # --- CONFIGURATION ---
-TOKEN = os.environ.get('BOT_TOKEN', '8830413686:AAGYhiUjoGaVYke1659-DI65lLL2wuUpdaM')
+TOKEN = os.environ.get('BOT_TOKEN', '8512107549:AAG9Ygip1CsM0kKifW1qrRZcT61AqvvOnXo')
 
 ADMIN_IDS = [
     int(os.environ.get('ADMIN_ID_1', '8644433143')),
@@ -257,7 +257,7 @@ def get_language_info(ext):
         '.js': ('JavaScript', 'node {file}', False),
         '.go': ('Go', 'go run {file}', False),
         '.rs': ('Rust', 'rustc {file} -o {dir}/out && {dir}/out', True),
-        '.java': ('Java', 'javac {file} && java -cp {dir} {class}', True),
+        '.java': ('Java', 'javac {file} && java -cp {dir} {class_name}', True),
         '.cpp': ('C++', 'g++ {file} -o {dir}/out && {dir}/out', True),
         '.c': ('C', 'gcc {file} -o {dir}/out && {dir}/out', True),
         '.sh': ('Bash', 'bash {file}', False),
@@ -270,6 +270,7 @@ def get_language_info(ext):
     return info.get(ext, ('Unknown', 'echo "Unsupported: {file}"', False))
 
 def get_run_command(file_path, ext):
+    """Returns proper run command for any language"""
     lang, template, needs_compile = get_language_info(ext)
     if lang == 'Unknown':
         return ['echo', f'Unsupported file type: {ext}']
@@ -277,9 +278,10 @@ def get_run_command(file_path, ext):
     dirname = os.path.dirname(file_path)
     filename = os.path.basename(file_path)
     
+    # FIX: Handle Java with proper class_name (not 'class')
     if ext == '.java':
-        classname = filename.replace('.java', '')
-        cmd = f'javac "{file_path}" && java -cp "{dirname}" {classname}'
+        class_name = filename.replace('.java', '')
+        cmd = f'javac "{file_path}" && java -cp "{dirname}" {class_name}'
         return ['bash', '-c', cmd]
     elif ext in ['.rs', '.cpp', '.c']:
         cmd = template.format(file=file_path, dir=dirname)
@@ -287,8 +289,11 @@ def get_run_command(file_path, ext):
     elif ext == '.html':
         return ['echo', f'HTML file served at /project/{os.path.basename(dirname)}']
     else:
-        cmd = template.format(file=file_path, dir=dirname, class='')
-        return ['bash', '-c', cmd] if '&&' in cmd else cmd.split()
+        # For other languages, use template
+        cmd = template.format(file=file_path, dir=dirname, class_name='')
+        if '&&' in cmd:
+            return ['bash', '-c', cmd]
+        return cmd.split()
 
 # --- FLASK WEB ---
 app = Flask(__name__)
@@ -321,13 +326,13 @@ def run_web():
 # --- KEYBOARD ---
 def get_main_keyboard(user_id):
     lock_status = "🔓 UNLOCK" if bot_locked else "🔒 LOCK"
-    restart_status = "🔄 AUTO RESTART: OFF" if auto_restart_mode else "🔄 AUTO RESTART: ON"
+    restart_status = "🔄 RESTART: OFF" if auto_restart_mode else "🔄 RESTART: ON"
     recovery_status = "🛡️ RECOVERY: OFF" if recovery_enabled else "🛡️ RECOVERY: ON"
-    logs_status = "📺 LIVE LOGS: OFF" if live_logs_enabled else "📺 LIVE LOGS: ON"
+    logs_status = "📺 LOGS: OFF" if live_logs_enabled else "📺 LOGS: ON"
     
     if is_admin(user_id):
         layout = [
-            [KeyboardButton("📤 UPLOAD"), KeyboardButton("📁 MY PROJECTS")],
+            [KeyboardButton("📤 UPLOAD"), KeyboardButton("📁 PROJECTS")],
             [KeyboardButton("🗑️ DELETE"), KeyboardButton("🖥️ HEALTH")],
             [KeyboardButton("🌎 INFO"), KeyboardButton("📠 CONTACT")],
             [KeyboardButton(lock_status), KeyboardButton(restart_status)],
@@ -336,7 +341,7 @@ def get_main_keyboard(user_id):
         ]
     else:
         layout = [
-            [KeyboardButton("📤 UPLOAD"), KeyboardButton("📁 MY PROJECTS")],
+            [KeyboardButton("📤 UPLOAD"), KeyboardButton("📁 PROJECTS")],
             [KeyboardButton("🗑️ DELETE"), KeyboardButton("🖥️ HEALTH")],
             [KeyboardButton("🌎 INFO"), KeyboardButton("📠 CONTACT")],
             [KeyboardButton(logs_status), KeyboardButton("🎫 PROMO")]
@@ -437,7 +442,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, reply_markup=get_main_keyboard(user_id), parse_mode='Markdown')
 
-# --- UPLOAD HANDLER (NEW STYLE) ---
+# --- UPLOAD HANDLER ---
 async def handle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not await require_channel(update, context):
@@ -576,7 +581,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=f"✅ **Project `{project_name}` ready!**\n"
                      f"📁 Language: {lang}\n"
                      f"📦 Used: {get_user_project_count(user_id)}/{get_user_limit(user_id)}\n"
-                     f"🚀 Click '📁 MY PROJECTS' to run it.",
+                     f"🚀 Click '📁 PROJECTS' to run it.",
                 parse_mode='Markdown'
             )
             return
@@ -612,7 +617,7 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 
-# --- HANDLE TEXT INPUT FOR PROJECT NAME ---
+# --- HANDLE TEXT INPUT ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
@@ -665,7 +670,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ **Project `{project_name}` saved!**\n"
                 f"📁 Language: {state['lang']}\n"
                 f"📦 Used: {get_user_project_count(user_id)}/{get_user_limit(user_id)}\n"
-                f"🚀 Click '📁 MY PROJECTS' to run.",
+                f"🚀 Click '📁 PROJECTS' to run.",
                 parse_mode='Markdown'
             )
         except Exception as e:
@@ -680,7 +685,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "📤 UPLOAD":
         await handle_upload(update, context)
     
-    elif text == "📁 MY PROJECTS":
+    elif text == "📁 PROJECTS":
         projects = [p for p, d in project_owners.items() if d["u_id"] == user_id]
         if not projects:
             await update.message.reply_text("📁 **No projects found**\nUse '📤 UPLOAD' to add one.", parse_mode='Markdown')
@@ -764,7 +769,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await animate(update, context, Loading.executing(), delay=0.2, final=f"🔒 **System {status}**")
         await update.message.reply_text("Menu updated!", reply_markup=get_main_keyboard(user_id), parse_mode='Markdown')
     
-    elif "🔄 AUTO RESTART:" in text and is_admin(user_id):
+    elif "🔄 RESTART:" in text and is_admin(user_id):
         auto_restart_mode = "OFF" in text
         status = "ON" if auto_restart_mode else "OFF"
         await animate(update, context, Loading.executing(), delay=0.2, final=f"🔄 **Auto-Restart: {status}**")
@@ -776,7 +781,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await animate(update, context, Loading.executing(), delay=0.2, final=f"🛡️ **Recovery: {status}**")
         await update.message.reply_text("Menu updated!", reply_markup=get_main_keyboard(user_id), parse_mode='Markdown')
     
-    elif "📺 LIVE LOGS:" in text:
+    elif "📺 LOGS:" in text:
         live_logs_enabled = "OFF" in text
         status = "ON" if live_logs_enabled else "OFF"
         if not live_logs_enabled:
@@ -968,7 +973,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.edit_message_text(f"🗑️ **`{p_name}` deleted!**", parse_mode='Markdown')
 
-# --- MONITOR PROCESS (Auto-Restart) ---
+# --- MONITOR PROCESS ---
 async def monitor_process(p_name, folder):
     while auto_restart_mode and p_name in running_processes:
         proc = running_processes.get(p_name)
@@ -1077,7 +1082,6 @@ async def cmd_setlimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     username = args[0].replace('@', '')
     limit = int(args[1]) if args[1].isdigit() else DEFAULT_USER_LIMIT
-    # Find user by username
     target_user = None
     for uid, data in project_owners.items():
         if data.get("u_username") == username:
